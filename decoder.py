@@ -4,15 +4,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 SOS_TOKEN = 0
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class Attention(nn.Module):
-    def __init__(self, hidden_size: int):
+    def __init__(self, hidden_size: int, device: str = "cpu"):
         super(Attention, self).__init__()
-        self.Wa = nn.Linear(hidden_size, hidden_size)
-        self.Ua = nn.Linear(hidden_size, hidden_size)
-        self.Va = nn.Linear(hidden_size, 1)
+        self.Wa = nn.Linear(hidden_size, hidden_size, device=device)
+        self.Ua = nn.Linear(hidden_size, hidden_size, device=device)
+        self.Va = nn.Linear(hidden_size, 1, device=device)
 
     def forward(
         self, query: torch.Tensor, keys: torch.Tensor
@@ -35,19 +34,23 @@ class ActionDecoder(nn.Module):
         n_layers: int,
         dropout: float = 0.1,
         attention: bool = True,
+        device: str = "cpu",
     ):
         super(ActionDecoder, self).__init__()
-        self.embedding = nn.Embedding(output_size, hidden_size)
+        self.embedding = nn.Embedding(output_size, hidden_size, device=device)
         if attention:
-            self.attention = Attention(hidden_size)
+            self.attention = Attention(hidden_size, device)
             self.lstm = nn.LSTM(
                 2 * hidden_size, hidden_size, n_layers, batch_first=True
-            )
+            ).to(device)
         else:
             self.attention = None
-            self.lstm = nn.LSTM(hidden_size, hidden_size, n_layers, batch_first=True)
-        self.out = nn.Linear(hidden_size, output_size)
+            self.lstm = nn.LSTM(
+                hidden_size, hidden_size, n_layers, batch_first=True
+            ).to(device)
+        self.out = nn.Linear(hidden_size, output_size, device=device)
         self.dropout = nn.Dropout(dropout)
+        self.device = device
 
     def forward(
         self,
@@ -59,8 +62,9 @@ class ActionDecoder(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size = encoder_outputs.size(0)
         decoder_input = torch.empty(
-            batch_size, 1, dtype=torch.long, device=device
+            batch_size, 1, dtype=torch.long, device=self.device
         ).fill_(SOS_TOKEN)
+
         decoder_hidden = encoder_hidden
         decoder_cell = encoder_cell
         decoder_outputs = []
@@ -107,8 +111,10 @@ class ActionDecoder(nn.Module):
         if self.attention is not None:
             embedded = self.dropout(self.embedding(input))
             query = hidden.permute(1, 0, 2)
-            # FIXME: encoder_outputs: (batch_size, seq_length, hidden_size) + query||hidden: (n_layers, batch_size, hidden_size)
-            context, attn_weights = self.attention(query=query, keys=encoder_outputs)
+            keys = encoder_outputs
+            # FIXME: keys|| encoder_outputs: (batch_size, seq_length, hidden_size)
+            #        query|| hidden: ( batch_size, n_layers, hidden_size)
+            context, attn_weights = self.attention(query, keys)
             lstm_input = torch.cat((embedded, context), dim=2)
         else:
             output = self.embedding(input)

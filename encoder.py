@@ -10,23 +10,24 @@ class CommandEncoder(nn.Module):
         hidden_size: int = 100,
         n_layers: int = 1,
         dropout: float = 0.1,
+        device: str = "cpu",
     ):
         super(CommandEncoder, self).__init__()
         self.hidden_size = hidden_size
-        self.embedding = nn.Embedding(input_size, hidden_size)
+        self.embedding = nn.Embedding(input_size, hidden_size, device=device)
         self.lstm = nn.LSTM(
             input_size=hidden_size,
             hidden_size=hidden_size,
             num_layers=n_layers,
-            dropout=dropout,
             batch_first=True,
-        )
+        ).to(device)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(
         self, x: torch.Tensor, hidden: torch.Tensor, cell: torch.Tensor
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         # x: (batch_size, seq_length)?
-        embeds = self.embedding(x)
+        embeds = self.dropout(self.embedding(x))
         # embeds: (batch_size, seq_length, hidden_size)
         if hidden is None or cell is None:
             output, (hidden, cell) = self.lstm(embeds)

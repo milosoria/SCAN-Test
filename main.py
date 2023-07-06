@@ -2,6 +2,7 @@
 # LSTM, attention, one layer, 100 hidden units, dropout 0.1
 import torch
 from torch import nn, optim
+import random
 from torch.utils.data import TensorDataset, RandomSampler, DataLoader
 from lang import Lang
 from typing import Tuple
@@ -19,7 +20,14 @@ EOS_TOKEN = 1
 PATH = "../SCAN"
 # Get from paper
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if torch.cuda.is_available():
+    device = "cuda"
+elif torch.backends.mps.is_available():
+    device = "mps"
+else:
+    device = "cpu"
+print(f"Using {device}")
+device = torch.device(device)
 
 
 def get_max_length(data: list[Tuple[str, str]]) -> int:
@@ -80,7 +88,9 @@ def pair_to_tensor(pair: Tuple[str, str]) -> Tuple[torch.Tensor, torch.Tensor]:
     return (input_tensor, target_tensor)
 
 
-def get_dataloader(batch_size, data) -> Tuple[Lang, Lang, DataLoader, int]:
+def get_dataloader(
+    batch_size, data
+) -> Tuple[Lang, Lang, DataLoader, int, list[Tuple[str, str]]]:
     input_lang, output_lang, pairs = load_langs("primitives", "commands", data)
     max_length = get_max_length(pairs)
     n = len(pairs)
@@ -101,9 +111,9 @@ def get_dataloader(batch_size, data) -> Tuple[Lang, Lang, DataLoader, int]:
 
     train_sampler = RandomSampler(train_data)
     train_dataloader = DataLoader(
-        train_data, sampler=train_sampler, batch_size=batch_size
+        train_data, sampler=train_sampler, batch_size=batch_size, drop_last=True
     )
-    return input_lang, output_lang, train_dataloader, max_length
+    return input_lang, output_lang, train_dataloader, max_length, pairs
 
 
 def train_epoch(
@@ -123,7 +133,9 @@ def train_epoch(
         decoder_optimizer.zero_grad()
 
         encoder_outputs, (encoder_hidden, encoder_cell) = encoder(
-            input_tensor, encoder_hidden, encoder_cell
+            input_tensor,
+            encoder_hidden.detach() if encoder_hidden is not None else None,
+            encoder_cell.detach() if encoder_cell is not None else None,
         )
         decoder_outputs, _, _ = decoder(
             encoder_outputs, encoder_hidden, encoder_cell, max_length, target_tensor
@@ -151,20 +163,61 @@ def show_plot(points: list[float]):
     plt.plot(points)
 
 
+def evaluate(
+    encoder: CommandEncoder,
+    decoder: ActionDecoder,
+    sentence: str,
+    input_lang: Lang,
+    output_lang: Lang,
+) -> Tuple[list[str], torch.Tensor]:
+    with torch.no_grad():
+        input_tensor = sentence_to_tensor(input_lang, sentence)
+        encoder_outputs, encoder_hidden = encoder(input_tensor)
+        decoder_outputs, _, decoder_attn = decoder(encoder_outputs, encoder_hidden)
+
+        _, topi = decoder_outputs.topk(1)
+        decoded_ids = topi.squeeze()
+
+        decoded_words = []
+        for idx in decoded_ids:
+            if idx.item() == EOS_TOKEN:
+                decoded_words.append("<EOS>")
+                break
+            decoded_words.append(output_lang.index2word[idx.item()])
+    return decoded_words, decoder_attn
+
+
+def evaluate_randomly(
+    encoder: CommandEncoder,
+    decoder: ActionDecoder,
+    pairs: list[Tuple[str, str]],
+    n: int = 10,
+):
+    for _ in range(n):
+        pair = random.choice(pairs)
+        print(">", pair[0])
+        print("=", pair[1])
+        output_words, _ = evaluate(encoder, decoder, pair[0], input_lang, output_lang)
+        output_sentence = " ".join(output_words)
+        print("<", output_sentence)
+        print("")
+
+
 if __name__ == "__main__":
     data = read_file("length_split/tasks_train_length.txt")
     hparams = {
         "batch_size": 32,
-        "hidden_size": 200,
+        "hidden_size": 100,
         "n_epochs": 10000,
-        "n_layers": 2,
+        "n_layers": 1,
         "lr": 0.001,
-        "dropout": 0.5,
+        "dropout": 0.1,
         "print_every": 100,
         "plot_every": 100,
         "save_every": 100,
+        "eval_every": 100,
     }
-    input_lang, output_lang, train_dataloader, max_length = get_dataloader(
+    input_lang, output_lang, train_dataloader, max_length, pairs = get_dataloader(
         hparams["batch_size"], data
     )
     encoder = CommandEncoder(
@@ -172,11 +225,15 @@ if __name__ == "__main__":
         hidden_size=hparams["hidden_size"],
         n_layers=hparams["n_layers"],
         dropout=hparams["dropout"],
+        device=device,
     )
     decoder = ActionDecoder(
         output_size=output_lang.n_words,
         hidden_size=hparams["hidden_size"],
         n_layers=hparams["n_layers"],
+        dropout=hparams["dropout"],
+        attention=True,
+        device=device,
     )
     criterion = torch.nn.CrossEntropyLoss()
     plot_losses = []
@@ -188,6 +245,8 @@ if __name__ == "__main__":
     criterion = nn.NLLLoss()
 
     for epoch in range(1, hparams["n_epochs"] + 1):
+        encoder.train()
+        decoder.train()
         loss = train_epoch(
             train_dataloader,
             encoder,
@@ -219,5 +278,10 @@ if __name__ == "__main__":
         if epoch % hparams["save_every"] == 0:
             encoder.save(f"encoder_{epoch}.pt")
             decoder.save(f"decoder_{epoch}.pt")
+
+        if epoch % hparams["eval_every"] == 0:
+            encoder.eval()
+            decoder.eval()
+            evaluate_randomly(encoder, decoder, pairs)
 
     show_plot(plot_losses)
