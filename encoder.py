@@ -10,7 +10,7 @@ class CommandEncoder(nn.Module):
         hidden_size: int = 100,
         n_layers: int = 1,
         dropout: float = 0.1,
-        device: str = "cpu",
+        device=torch.device("cpu"),
     ):
         super(CommandEncoder, self).__init__()
         self.hidden_size = hidden_size

@@ -170,10 +170,16 @@ def evaluate(
     input_lang: Lang,
     output_lang: Lang,
 ) -> Tuple[list[str], torch.Tensor]:
+    encoder_hidden, encoder_cell = (None, None)
     with torch.no_grad():
         input_tensor = sentence_to_tensor(input_lang, sentence)
-        encoder_outputs, encoder_hidden = encoder(input_tensor)
-        decoder_outputs, _, decoder_attn = decoder(encoder_outputs, encoder_hidden)
+
+        encoder_outputs, (encoder_hidden, encoder_cell) = encoder(
+            input_tensor, encoder_hidden, encoder_cell
+        )
+        decoder_outputs, _, decoder_attn = decoder(
+            encoder_outputs, encoder_hidden, encoder_cell, max_length, None
+        )
 
         _, topi = decoder_outputs.topk(1)
         decoded_ids = topi.squeeze()
@@ -195,16 +201,15 @@ def evaluate_randomly(
 ):
     for _ in range(n):
         pair = random.choice(pairs)
-        print(">", pair[0])
-        print("=", pair[1])
+        print("INPUT: ", pair[0])
+        print("TARGET: ", pair[1])
         output_words, _ = evaluate(encoder, decoder, pair[0], input_lang, output_lang)
         output_sentence = " ".join(output_words)
-        print("<", output_sentence)
+        print("OUTPUT: ", output_sentence)
         print("")
 
 
 if __name__ == "__main__":
-    data = read_file("length_split/tasks_train_length.txt")
     hparams = {
         "batch_size": 32,
         "hidden_size": 100,
@@ -212,14 +217,23 @@ if __name__ == "__main__":
         "n_layers": 1,
         "lr": 0.001,
         "dropout": 0.1,
-        "print_every": 100,
+        "print_every": 10,
         "plot_every": 100,
         "save_every": 100,
         "eval_every": 100,
     }
+
+    train_data = read_file("length_split/tasks_train_length.txt")
+    test_data = read_file("length_split/tasks_test_length.txt")
+
     input_lang, output_lang, train_dataloader, max_length, pairs = get_dataloader(
-        hparams["batch_size"], data
+        hparams["batch_size"], train_data
     )
+
+    _, _, test_dataloader, _, test_pairs = get_dataloader(
+        hparams["batch_size"], test_data
+    )
+
     encoder = CommandEncoder(
         input_size=input_lang.n_words,
         hidden_size=hparams["hidden_size"],
@@ -227,6 +241,7 @@ if __name__ == "__main__":
         dropout=hparams["dropout"],
         device=device,
     )
+    encoder.load("models/encoder_200.pt")
     decoder = ActionDecoder(
         output_size=output_lang.n_words,
         hidden_size=hparams["hidden_size"],
@@ -235,6 +250,7 @@ if __name__ == "__main__":
         attention=True,
         device=device,
     )
+    decoder.load("models/decoder_200.pt")
     criterion = torch.nn.CrossEntropyLoss()
     plot_losses = []
     print_loss_total = 0  # Reset every print_every
@@ -245,6 +261,7 @@ if __name__ == "__main__":
     criterion = nn.NLLLoss()
 
     for epoch in range(1, hparams["n_epochs"] + 1):
+        print("Epoch: ", epoch)
         encoder.train()
         decoder.train()
         loss = train_epoch(
@@ -274,14 +291,13 @@ if __name__ == "__main__":
             plot_loss_avg = plot_loss_total / hparams["plot_every"]
             plot_losses.append(plot_loss_avg)
             plot_loss_total = 0
-
+            if len(plot_losses) > 100:
+                show_plot(plot_losses)
         if epoch % hparams["save_every"] == 0:
-            encoder.save(f"encoder_{epoch}.pt")
-            decoder.save(f"decoder_{epoch}.pt")
+            encoder.save(f"models/encoder_{epoch}.pt")
+            decoder.save(f"models/decoder_{epoch}.pt")
 
         if epoch % hparams["eval_every"] == 0:
             encoder.eval()
             decoder.eval()
-            evaluate_randomly(encoder, decoder, pairs)
-
-    show_plot(plot_losses)
+            evaluate_randomly(encoder, decoder, test_pairs)

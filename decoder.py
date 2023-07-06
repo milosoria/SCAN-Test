@@ -7,7 +7,7 @@ SOS_TOKEN = 0
 
 
 class Attention(nn.Module):
-    def __init__(self, hidden_size: int, device: str = "cpu"):
+    def __init__(self, hidden_size: int, device=torch.device("cpu")):
         super(Attention, self).__init__()
         self.Wa = nn.Linear(hidden_size, hidden_size, device=device)
         self.Ua = nn.Linear(hidden_size, hidden_size, device=device)
@@ -34,7 +34,7 @@ class ActionDecoder(nn.Module):
         n_layers: int,
         dropout: float = 0.1,
         attention: bool = True,
-        device: str = "cpu",
+        device=torch.device("cpu"),
     ):
         super(ActionDecoder, self).__init__()
         self.embedding = nn.Embedding(output_size, hidden_size, device=device)
@@ -125,9 +125,7 @@ class ActionDecoder(nn.Module):
         return output, hidden, cell, attn_weights if attn_weights is not None else None
 
     def save(self, path: str):
-        path = "attention_" + path if self.attention is not None else path
         torch.save(self.state_dict(), path)
 
     def load(self, path: str):
-        path = "attention_" + path if self.attention is not None else path
         self.load_state_dict(torch.load(path))
