@@ -222,9 +222,9 @@ if __name__ == "__main__":
         "save_every": 100,
         "eval_every": 100,
     }
-
-    train_data = read_file("length_split/tasks_train_length.txt")
-    test_data = read_file("length_split/tasks_test_length.txt")
+    experiment = "length_split"
+    train_data = read_file(f"{experiment}/tasks_train_length.txt")
+    test_data = read_file(f"{experiment}/tasks_test_length.txt")
 
     input_lang, output_lang, train_dataloader, max_length, pairs = get_dataloader(
         hparams["batch_size"], train_data
@@ -241,7 +241,7 @@ if __name__ == "__main__":
         dropout=hparams["dropout"],
         device=device,
     )
-    encoder.load("models/encoder_200.pt")
+    # encoder.load(f"models/{experiment}/encoder_200.pt")
     decoder = ActionDecoder(
         output_size=output_lang.n_words,
         hidden_size=hparams["hidden_size"],
@@ -250,7 +250,7 @@ if __name__ == "__main__":
         attention=True,
         device=device,
     )
-    decoder.load("models/decoder_200.pt")
+    # decoder.load(f"models/{experiment}/decoder_200.pt")
     criterion = torch.nn.CrossEntropyLoss()
     plot_losses = []
     print_loss_total = 0  # Reset every print_every
@@ -261,7 +261,6 @@ if __name__ == "__main__":
     criterion = nn.NLLLoss()
 
     for epoch in range(1, hparams["n_epochs"] + 1):
-        print("Epoch: ", epoch)
         encoder.train()
         decoder.train()
         loss = train_epoch(
@@ -279,7 +278,7 @@ if __name__ == "__main__":
             print_loss_avg = print_loss_total / hparams["print_every"]
             print_loss_total = 0
             print(
-                "(%d %d%%) %.4f"
+                    "(Epoch: %d, Progress: %d%%) Acc: %.4f"
                 % (
                     epoch,
                     epoch / hparams["n_epochs"] * 100,
@@ -294,10 +293,13 @@ if __name__ == "__main__":
             if len(plot_losses) > 100:
                 show_plot(plot_losses)
         if epoch % hparams["save_every"] == 0:
-            encoder.save(f"models/encoder_{epoch}.pt")
-            decoder.save(f"models/decoder_{epoch}.pt")
+            encoder.save(f"models/{experiment}/encoder_{epoch}.pt")
+            decoder.save(f"models/{experiment}/decoder_{epoch}.pt")
 
         if epoch % hparams["eval_every"] == 0:
+            print("Evaluating: ")
             encoder.eval()
             decoder.eval()
             evaluate_randomly(encoder, decoder, test_pairs)
+# Innovation: show to the model test commands each epoch with certain frequency, study the frequency
+# needed to acheive an improvement in the model
