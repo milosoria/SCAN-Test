@@ -47,29 +47,45 @@ def read_file(relative_path: str) -> list[str]:
 
 def preprocess(
     data: list[str],
-    input_lang_name: str,
-    output_lang_name: str,
-) -> Tuple[Lang, Lang, list[Tuple[str, str]]]:
+) -> list[Tuple[str, str]]:
     pairs = []
-    print("Read %i %s-%s lines" % (len(data), input_lang_name, output_lang_name))
     for line in data:
         primitives, commands = line[4:].split(" OUT: ")
         commands = commands.strip("\n")
         pairs.append((primitives, commands))
-    return Lang(input_lang_name), Lang(output_lang_name), pairs
+    return pairs
 
 
 def load_langs(
-    input_lang_name: str, output_lang_name: str, data: list[str]
-) -> Tuple[Lang, Lang, list[Tuple[str, str]]]:
-    input_lang, output_lang, pairs = preprocess(data, input_lang_name, output_lang_name)
-    for input, output in pairs:
+    input_lang_name: str,
+    output_lang_name: str,
+    train_data: list[str],
+    test_data: list[str],
+) -> Tuple[Lang, Lang, list[Tuple[str, str]], list[Tuple[str, str]]]:
+    print(
+        "Train Split: Read %i %s-%s lines"
+        % (len(train_data), input_lang_name, output_lang_name)
+    )
+    print(
+        "Test Split: Read %i %s-%s lines"
+        % (len(test_data), input_lang_name, output_lang_name)
+    )
+
+    input_lang, output_lang = Lang(input_lang_name), Lang(output_lang_name)
+    train_pairs = preprocess(train_data)
+    test_pairs = preprocess(test_data)
+
+    for input, output in train_pairs:
+        input_lang.add_sentence(input)
+        output_lang.add_sentence(output)
+
+    for input, output in test_pairs:
         input_lang.add_sentence(input)
         output_lang.add_sentence(output)
     print("Counted Words")
     print(input_lang.name, input_lang.n_words)
     print(output_lang.name, output_lang.n_words)
-    return input_lang, output_lang, pairs
+    return input_lang, output_lang, train_pairs, test_pairs
 
 
 def word_to_index(lang: Lang, sentence: str) -> list[int]:
@@ -89,9 +105,8 @@ def pair_to_tensor(pair: Tuple[str, str]) -> Tuple[torch.Tensor, torch.Tensor]:
 
 
 def get_dataloader(
-    batch_size, data
+    batch_size: int, input_lang: Lang, output_lang: Lang, pairs: list[Tuple[str, str]]
 ) -> Tuple[Lang, Lang, DataLoader, int, list[Tuple[str, str]]]:
-    input_lang, output_lang, pairs = load_langs("primitives", "commands", data)
     max_length = get_max_length(pairs)
     n = len(pairs)
     input_ids = np.zeros((n, max_length), dtype=np.int32)
@@ -166,13 +181,15 @@ def show_plot(points: list[float]):
 def evaluate(
     encoder: CommandEncoder,
     decoder: ActionDecoder,
-    sentence: str,
+    pair: Tuple[str, str],
     input_lang: Lang,
     output_lang: Lang,
-) -> Tuple[list[str], torch.Tensor]:
+) -> Tuple[list[str], torch.Tensor, torch.Tensor]:
     encoder_hidden, encoder_cell = (None, None)
+    (input_sentence, input_target) = pair
     with torch.no_grad():
-        input_tensor = sentence_to_tensor(input_lang, sentence)
+        input_tensor = sentence_to_tensor(input_lang, input_sentence)
+        target_tensor = sentence_to_tensor(input_lang, input_target)
 
         encoder_outputs, (encoder_hidden, encoder_cell) = encoder(
             input_tensor, encoder_hidden, encoder_cell
@@ -190,30 +207,42 @@ def evaluate(
                 decoded_words.append("<EOS>")
                 break
             decoded_words.append(output_lang.index2word[idx.item()])
-    return decoded_words, decoder_attn
+        loss = criterion(
+            decoder_outputs.view(-1, decoder_outputs.size(-1)),
+            target_tensor.view(-1),
+        )
+    return decoded_words, decoder_attn, loss
+
+
+def log_it(output_str: str, experiment: str):
+    print(output_str)
+    with open(f"logs/{experiment}.txt", "a") as f:
+        f.write(output_str)
 
 
 def evaluate_randomly(
     encoder: CommandEncoder,
     decoder: ActionDecoder,
+    input_lang: Lang,
+    output_lang: Lang,
     pairs: list[Tuple[str, str]],
     n: int = 10,
 ):
     for _ in range(n):
         pair = random.choice(pairs)
-        print("INPUT: ", pair[0])
-        print("TARGET: ", pair[1])
-        output_words, _ = evaluate(encoder, decoder, pair[0], input_lang, output_lang)
+        output_words, _, loss = evaluate(
+            encoder, decoder, pair, input_lang, output_lang
+        )
         output_sentence = " ".join(output_words)
-        print("OUTPUT: ", output_sentence)
-        print("")
+        output_str = f"INPUT: {pair[0]}\nTARGET: {pair[1]}\nOUTPUT: {output_sentence}\nLOSS: {loss}\n"
+        log_it(output_str, experiment)
 
 
 if __name__ == "__main__":
     hparams = {
         "batch_size": 32,
         "hidden_size": 100,
-        "n_epochs": 10000,
+        "n_epochs": 500,
         "n_layers": 1,
         "lr": 0.001,
         "dropout": 0.1,
@@ -225,13 +254,26 @@ if __name__ == "__main__":
     experiment = "length_split"
     train_data = read_file(f"{experiment}/tasks_train_length.txt")
     test_data = read_file(f"{experiment}/tasks_test_length.txt")
+    # load langs with train and test data, so both have all the words from their respective domains
+    input_lang, output_lang, train_pairs, test_pairs = load_langs(
+        input_lang_name="primitives",
+        output_lang_name="commands",
+        train_data=train_data,
+        test_data=test_data,
+    )
 
-    input_lang, output_lang, train_dataloader, max_length, pairs = get_dataloader(
-        hparams["batch_size"], train_data
+    input_lang, output_lang, train_dataloader, max_length, train_pairs = get_dataloader(
+        batch_size=hparams["batch_size"],
+        input_lang=input_lang,
+        output_lang=output_lang,
+        pairs=train_pairs,
     )
 
     _, _, test_dataloader, _, test_pairs = get_dataloader(
-        hparams["batch_size"], test_data
+        batch_size=hparams["batch_size"],
+        input_lang=input_lang,
+        output_lang=output_lang,
+        pairs=test_pairs,
     )
 
     encoder = CommandEncoder(
@@ -277,14 +319,12 @@ if __name__ == "__main__":
         if epoch % hparams["print_every"] == 0:
             print_loss_avg = print_loss_total / hparams["print_every"]
             print_loss_total = 0
-            print(
-                    "(Epoch: %d, Progress: %d%%) Acc: %.4f"
-                % (
-                    epoch,
-                    epoch / hparams["n_epochs"] * 100,
-                    print_loss_avg,
-                )
+            output_str = "(Epoch: %d, Progress: %d%%) Acc: %.4f" % (
+                epoch,
+                epoch / hparams["n_epochs"] * 100,
+                print_loss_avg,
             )
+            log_it(output_str, experiment)
 
         if epoch % hparams["plot_every"] == 0:
             plot_loss_avg = plot_loss_total / hparams["plot_every"]
@@ -292,6 +332,7 @@ if __name__ == "__main__":
             plot_loss_total = 0
             if len(plot_losses) > 100:
                 show_plot(plot_losses)
+
         if epoch % hparams["save_every"] == 0:
             encoder.save(f"models/{experiment}/encoder_{epoch}.pt")
             decoder.save(f"models/{experiment}/decoder_{epoch}.pt")
@@ -300,6 +341,6 @@ if __name__ == "__main__":
             print("Evaluating: ")
             encoder.eval()
             decoder.eval()
-            evaluate_randomly(encoder, decoder, test_pairs)
+            evaluate_randomly(encoder, decoder, input_lang, output_lang, test_pairs)
 # Innovation: show to the model test commands each epoch with certain frequency, study the frequency
-# needed to acheive an improvement in the model
+# needed to acheive an mprovement in the model
