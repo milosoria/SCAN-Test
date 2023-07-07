@@ -105,9 +105,12 @@ def pair_to_tensor(pair: Tuple[str, str]) -> Tuple[torch.Tensor, torch.Tensor]:
 
 
 def get_dataloader(
-    batch_size: int, input_lang: Lang, output_lang: Lang, pairs: list[Tuple[str, str]]
-) -> Tuple[Lang, Lang, DataLoader, int, list[Tuple[str, str]]]:
-    max_length = get_max_length(pairs)
+    batch_size: int,
+    max_length: int,
+    input_lang: Lang,
+    output_lang: Lang,
+    pairs: list[Tuple[str, str]],
+) -> Tuple[Lang, Lang, DataLoader, list[Tuple[str, str]]]:
     n = len(pairs)
     input_ids = np.zeros((n, max_length), dtype=np.int32)
     target_ids = np.zeros((n, max_length), dtype=np.int32)
@@ -128,13 +131,14 @@ def get_dataloader(
     train_dataloader = DataLoader(
         train_data, sampler=train_sampler, batch_size=batch_size, drop_last=True
     )
-    return input_lang, output_lang, train_dataloader, max_length, pairs
+    return input_lang, output_lang, train_dataloader, pairs
 
 
 def train_epoch(
     dataloader: DataLoader,
     encoder: CommandEncoder,
     decoder: ActionDecoder,
+    max_length: int,
     encoder_optimizer,
     decoder_optimizer,
     criterion,
@@ -178,6 +182,12 @@ def show_plot(points: list[float]):
     plt.plot(points)
 
 
+def log_it(output_str: str, experiment: str):
+    print(output_str)
+    with open(f"logs/{experiment}.txt", "a") as f:
+        f.write(output_str)
+
+
 def evaluate(
     encoder: CommandEncoder,
     decoder: ActionDecoder,
@@ -189,8 +199,7 @@ def evaluate(
     (input_sentence, input_target) = pair
     with torch.no_grad():
         input_tensor = sentence_to_tensor(input_lang, input_sentence)
-        target_tensor = sentence_to_tensor(input_lang, input_target)
-
+        target_tensor = sentence_to_tensor(output_lang, input_target)
         encoder_outputs, (encoder_hidden, encoder_cell) = encoder(
             input_tensor, encoder_hidden, encoder_cell
         )
@@ -207,17 +216,12 @@ def evaluate(
                 decoded_words.append("<EOS>")
                 break
             decoded_words.append(output_lang.index2word[idx.item()])
+
         loss = criterion(
             decoder_outputs.view(-1, decoder_outputs.size(-1)),
             target_tensor.view(-1),
         )
     return decoded_words, decoder_attn, loss
-
-
-def log_it(output_str: str, experiment: str):
-    print(output_str)
-    with open(f"logs/{experiment}.txt", "a") as f:
-        f.write(output_str)
 
 
 def evaluate_randomly(
@@ -231,7 +235,11 @@ def evaluate_randomly(
     for _ in range(n):
         pair = random.choice(pairs)
         output_words, _, loss = evaluate(
-            encoder, decoder, pair, input_lang, output_lang
+            encoder=encoder,
+            decoder=decoder,
+            pair=pair,
+            input_lang=input_lang,
+            output_lang=output_lang,
         )
         output_sentence = " ".join(output_words)
         output_str = f"INPUT: {pair[0]}\nTARGET: {pair[1]}\nOUTPUT: {output_sentence}\nLOSS: {loss}\n"
@@ -262,15 +270,19 @@ if __name__ == "__main__":
         test_data=test_data,
     )
 
-    input_lang, output_lang, train_dataloader, max_length, train_pairs = get_dataloader(
+    max_length = max(get_max_length(train_pairs), get_max_length(test_pairs))
+
+    (input_lang, output_lang, train_dataloader, train_pairs) = get_dataloader(
         batch_size=hparams["batch_size"],
+        max_length=max_length,
         input_lang=input_lang,
         output_lang=output_lang,
         pairs=train_pairs,
     )
 
-    _, _, test_dataloader, _, test_pairs = get_dataloader(
+    (input_lang, output_lang, test_dataloader, test_pairs) = get_dataloader(
         batch_size=hparams["batch_size"],
+        max_length=max_length,
         input_lang=input_lang,
         output_lang=output_lang,
         pairs=test_pairs,
@@ -293,7 +305,6 @@ if __name__ == "__main__":
         device=device,
     )
     # decoder.load(f"models/{experiment}/decoder_200.pt")
-    criterion = torch.nn.CrossEntropyLoss()
     plot_losses = []
     print_loss_total = 0  # Reset every print_every
     plot_loss_total = 0  # Reset every plot_every
@@ -309,6 +320,7 @@ if __name__ == "__main__":
             train_dataloader,
             encoder,
             decoder,
+            max_length,
             encoder_optimizer,
             decoder_optimizer,
             criterion,
@@ -330,7 +342,7 @@ if __name__ == "__main__":
             plot_loss_avg = plot_loss_total / hparams["plot_every"]
             plot_losses.append(plot_loss_avg)
             plot_loss_total = 0
-            if len(plot_losses) > 100:
+            if len(plot_losses) >= 100:
                 show_plot(plot_losses)
 
         if epoch % hparams["save_every"] == 0:
@@ -341,6 +353,12 @@ if __name__ == "__main__":
             print("Evaluating: ")
             encoder.eval()
             decoder.eval()
-            evaluate_randomly(encoder, decoder, input_lang, output_lang, test_pairs)
+            evaluate_randomly(
+                encoder=encoder,
+                decoder=decoder,
+                input_lang=input_lang,
+                output_lang=output_lang,
+                pairs=test_pairs,
+            )
 # Innovation: show to the model test commands each epoch with certain frequency, study the frequency
 # needed to acheive an mprovement in the model

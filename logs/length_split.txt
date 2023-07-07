@@ -1,0 +1,1 @@
+(Epoch: 10, Progress: 2%) Acc: 0.1308(Epoch: 20, Progress: 4%) Acc: 0.0318(Epoch: 30, Progress: 6%) Acc: 0.0064(Epoch: 40, Progress: 8%) Acc: 0.0020(Epoch: 50, Progress: 10%) Acc: 0.0010(Epoch: 60, Progress: 12%) Acc: 0.0008(Epoch: 70, Progress: 14%) Acc: 0.0006(Epoch: 80, Progress: 16%) Acc: 0.0003(Epoch: 90, Progress: 18%) Acc: 0.0007(Epoch: 100, Progress: 20%) Acc: 0.0001
