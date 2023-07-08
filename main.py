@@ -1,21 +1,16 @@
-# https://pytorch.org/tutorials/intermediate/seq2seq_translation_tutorial.html
-# LSTM, attention, one layer, 100 hidden units, dropout 0.1
 import torch
 from torch import nn, optim
-import random
-from torch.utils.data import TensorDataset, RandomSampler, DataLoader
-from lang import Lang
-from typing import Tuple
+from torch.utils.data import DataLoader, TensorDataset, RandomSampler
+from torch.nn import functional as F
 import numpy as np
+import matplotlib.pyplot as plt
+from typing import Tuple
+from lang import Lang
 from encoder import CommandEncoder
 from decoder import ActionDecoder
-import matplotlib.pyplot as plt
+import random
 
-plt.switch_backend("agg")
-import matplotlib.ticker as ticker
-import numpy as np
-
-SOS_TOKEN = 0
+#
 EOS_TOKEN = 1
 PATH = "../SCAN"
 # Get from paper
@@ -114,12 +109,12 @@ def get_dataloader(
     n = len(pairs)
     input_ids = np.zeros((n, max_length), dtype=np.int32)
     target_ids = np.zeros((n, max_length), dtype=np.int32)
+    input_ids.fill(EOS_TOKEN)
+    target_ids.fill(EOS_TOKEN)
 
     for idx, (inp, tgt) in enumerate(pairs):
         inp_ids = word_to_index(input_lang, inp)
         tgt_ids = word_to_index(output_lang, tgt)
-        inp_ids.append(EOS_TOKEN)
-        tgt_ids.append(EOS_TOKEN)
         input_ids[idx, : len(inp_ids)] = inp_ids
         target_ids[idx, : len(tgt_ids)] = tgt_ids
 
@@ -150,7 +145,6 @@ def train_epoch(
         input_tensor, target_tensor = data
         encoder_optimizer.zero_grad()
         decoder_optimizer.zero_grad()
-
         encoder_outputs, (encoder_hidden, encoder_cell) = encoder(
             input_tensor,
             encoder_hidden.detach() if encoder_hidden is not None else None,
@@ -217,6 +211,12 @@ def evaluate(
                 break
             decoded_words.append(output_lang.index2word[idx.item()])
 
+        target_tensor = F.pad(
+            target_tensor,
+            (0, max_length - target_tensor.size(1)),
+            "constant",
+            EOS_TOKEN,
+        )
         loss = criterion(
             decoder_outputs.view(-1, decoder_outputs.size(-1)),
             target_tensor.view(-1),
@@ -257,7 +257,7 @@ if __name__ == "__main__":
         "print_every": 10,
         "plot_every": 100,
         "save_every": 100,
-        "eval_every": 100,
+        "eval_every": 1,
     }
     experiment = "length_split"
     train_data = read_file(f"{experiment}/tasks_train_length.txt")
@@ -270,7 +270,7 @@ if __name__ == "__main__":
         test_data=test_data,
     )
 
-    max_length = max(get_max_length(train_pairs), get_max_length(test_pairs))
+    max_length = get_max_length(train_pairs)
 
     (input_lang, output_lang, train_dataloader, train_pairs) = get_dataloader(
         batch_size=hparams["batch_size"],
@@ -331,7 +331,7 @@ if __name__ == "__main__":
         if epoch % hparams["print_every"] == 0:
             print_loss_avg = print_loss_total / hparams["print_every"]
             print_loss_total = 0
-            output_str = "(Epoch: %d, Progress: %d%%) Acc: %.4f" % (
+            output_str = "(Epoch: %d, Progress: %d%%) Loss: %.4f" % (
                 epoch,
                 epoch / hparams["n_epochs"] * 100,
                 print_loss_avg,
