@@ -1,0 +1,1 @@
+(Epoch: 10, Progress: 2%) Loss: 0.0002 Acc: 1809.3812(Epoch: 20, Progress: 4%) Loss: 0.0000 Acc: 1809.3209(Epoch: 30, Progress: 6%) Loss: 0.0000 Acc: 1809.3441(Epoch: 10, Progress: 2%) Loss: 0.0002 Acc: 1809.3131
