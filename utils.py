@@ -94,7 +94,7 @@ def get_dataloader(
     input_lang: Lang,
     output_lang: Lang,
     pairs: list[Tuple[str, str]],
-) -> Tuple[Lang, Lang, DataLoader, list[Tuple[str, str]]]:
+) -> DataLoader:
     n = len(pairs)
     input_ids = np.zeros((n, max_length), dtype=np.int32)
     target_ids = np.zeros((n, max_length), dtype=np.int32)
@@ -115,7 +115,7 @@ def get_dataloader(
     train_dataloader = DataLoader(
         train_data, sampler=train_sampler, batch_size=batch_size, drop_last=True
     )
-    return input_lang, output_lang, train_dataloader, pairs
+    return train_dataloader
 
 
 def show_plot(points: list[float]):

@@ -191,7 +191,7 @@ if __name__ == "__main__":
 
     max_length = get_max_length(train_pairs)
 
-    (input_lang, output_lang, train_dataloader, train_pairs) = get_dataloader(
+    train_dataloader = get_dataloader(
         batch_size=hparams["batch_size"],
         max_length=max_length,
         input_lang=input_lang,
@@ -199,7 +199,7 @@ if __name__ == "__main__":
         pairs=train_pairs,
     )
 
-    (input_lang, output_lang, test_dataloader, test_pairs) = get_dataloader(
+    test_dataloader = get_dataloader(
         batch_size=hparams["batch_size"],
         max_length=max_length,
         input_lang=input_lang,
@@ -214,7 +214,7 @@ if __name__ == "__main__":
         dropout=hparams["dropout"],
         device=device,
     )
-    encoder.load(f"models/{experiment}/encoder_500.pt")
+    # encoder.load(f"models/{experiment}/encoder_500.pt")
     decoder = ActionDecoder(
         output_size=output_lang.n_words,
         hidden_size=hparams["hidden_size"],
@@ -223,7 +223,7 @@ if __name__ == "__main__":
         attention=True,
         device=device,
     )
-    decoder.load(f"models/{experiment}/decoder_500.pt")
+    # decoder.load(f"models/{experiment}/decoder_500.pt")
 
     encoder_optimizer = optim.Adam(encoder.parameters(), lr=hparams["lr"])
     decoder_optimizer = optim.Adam(decoder.parameters(), lr=hparams["lr"])
