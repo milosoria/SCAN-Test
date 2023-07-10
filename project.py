@@ -93,6 +93,7 @@ class CommandEncoder(nn.Module):
             batch_first=True,
         ).to(device)
         self.dropout = nn.Dropout(dropout)
+        self.device = device
 
     def forward(
         self, x: torch.Tensor, hidden: torch.Tensor, cell: torch.Tensor
@@ -113,7 +114,7 @@ class CommandEncoder(nn.Module):
         torch.save(self.state_dict(), path)
 
     def load(self, path: str):
-        self.load_state_dict(torch.load(path))
+        self.load_state_dict(torch.load(path, map_location=self.device))
 
 
 """## Decoder
@@ -175,6 +176,56 @@ class BahdanauAttention(nn.Module):
         return context, weights
 
 
+# Attention head
+class Head(nn.Module):
+    """one head of self-attention"""
+
+    def __init__(self, hidden_size: int, max_length: int, dropout: float, device):
+        super().__init__()
+        self.key = nn.Linear(hidden_size, hidden_size, bias=False, device=device)
+        self.query = nn.Linear(hidden_size, hidden_size, bias=False, device=device)
+        self.value = nn.Linear(hidden_size, hidden_size, bias=False, device=device)
+        self.register_buffer(
+            "tril", torch.tril(torch.ones(max_length, max_length, device=device))
+        )
+
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        B, T, C = x.shape
+        k = self.key(x)  # (B,T,C)
+        q = self.query(x)  # (B,T,C)
+        # compute attention scores ("affinities")
+        wei = q @ k.transpose(-2, -1) * C**-0.5  # (B, T, C) @ (B, C, T) -> (B, T, T)
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf"))  # (B, T, T)
+        wei = F.softmax(wei, dim=-1)  # (B, T, T)
+        wei = self.dropout(wei)
+        # perform the weighted aggregation of the values
+        v = self.value(x)  # (B,T,C)
+        wei = wei.squeeze(1)
+        out = wei @ v  # (B, T, T) @ (B, T, C) -> (B, T, C)
+        return out
+
+
+# Mutiple Head concatenated
+class MultiHeadAttention(nn.Module):
+    """multiple heads of self-attention in parallel"""
+
+    def __init__(self, num_heads, hidden_size, max_length, dropout, device):
+        super().__init__()
+        self.heads = nn.ModuleList(
+            [Head(hidden_size, 1, dropout, device=device) for _ in range(num_heads)]
+        )
+        self.proj = nn.Linear(2 * hidden_size, hidden_size, device=device)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        # 31, 1, 100
+        out = self.dropout(self.proj(out))
+        return out
+
+
 from typing import Tuple, Union
 import torch
 import torch.nn as nn
@@ -193,6 +244,7 @@ class ActionDecoder(nn.Module):
         attention: bool = True,
         attention_type: str = "bahdanau",
         device=torch.device("cpu"),
+        max_length=None,
     ):
         super(ActionDecoder, self).__init__()
         self.embedding = nn.Embedding(output_size, hidden_size, device=device)
@@ -202,8 +254,12 @@ class ActionDecoder(nn.Module):
             ).to(device)
             if attention_type == "bahdanau":
                 self.attention = BahdanauAttention(hidden_size, device)
-            else:
+            elif attention_type == "luong":
                 self.attention = LuongAttention(hidden_size, device)
+            elif attention_type == "multihead":
+                self.attention = MultiHeadAttention(
+                    2, hidden_size, max_length, dropout, device
+                )
         else:
             self.attention = None
             self.lstm = nn.LSTM(
@@ -212,6 +268,7 @@ class ActionDecoder(nn.Module):
         self.out = nn.Linear(hidden_size, output_size, device=device)
         self.dropout = nn.Dropout(dropout)
         self.device = device
+        self.attention_type = attention_type
 
     def forward(
         self,
@@ -257,7 +314,7 @@ class ActionDecoder(nn.Module):
 
         decoder_outputs = torch.cat(decoder_outputs, dim=1)
         decoder_outputs = F.log_softmax(decoder_outputs, dim=-1)
-        attentions = torch.cat(attentions, dim=1)
+        attentions = torch.cat(attentions, dim=1) if attentions[0] is not None else []
 
         return decoder_outputs, decoder_hidden, attentions
 
@@ -275,7 +332,11 @@ class ActionDecoder(nn.Module):
             keys = encoder_outputs
             # FIXME: keys|| encoder_outputs: (batch_size, seq_length, hidden_size)
             #        query|| hidden: ( batch_size, n_layers, hidden_size)
-            context, attn_weights = self.attention(query, keys)
+            if self.attention_type == "multihead":
+                context = self.attention(hidden)
+                context = context.permute(1, 0, 2)
+            else:
+                context, attn_weights = self.attention(query, keys)
             lstm_input = torch.cat((embedded, context), dim=2)
         else:
             output = self.embedding(input)
@@ -289,7 +350,7 @@ class ActionDecoder(nn.Module):
         torch.save(self.state_dict(), path)
 
     def load(self, path: str):
-        self.load_state_dict(torch.load(path))
+        self.load_state_dict(torch.load(path, map_location=self.device))
 
 
 """## Utilities functions"""
@@ -342,11 +403,11 @@ def load_langs(
 ) -> Tuple[Lang, Lang, list[Tuple[str, str]], list[Tuple[str, str]]]:
     print(
         "Train Split: Read %i %s-%s lines"
-        % (len(train_data), input_lang_name, output_lang_name)
+        #         % (len(train_data), input_lang_name, output_lang_name)
     )
     print(
         "Test Split: Read %i %s-%s lines"
-        % (len(test_data), input_lang_name, output_lang_name)
+        #         % (len(test_data), input_lang_name, output_lang_name)
     )
 
     input_lang, output_lang = Lang(input_lang_name), Lang(output_lang_name)
@@ -669,6 +730,7 @@ def train_or_test(
                 output_lang=output_lang,
                 pairs=test_pairs,
             )
+            print(output_str)
             log_it(
                 output_str,
                 experiment if not variant else f"{experiment}_{variant}",
@@ -679,6 +741,75 @@ def train_or_test(
 
 
 # """## Experiment 1"""
+
+# if __name__ == "__main__":
+#    hparams = {
+#        "batch_size": 32,
+#        "hidden_size": 100,
+#        "n_epochs": 4000,
+#        "n_layers": 1,
+#        "lr": 0.001,
+#        "dropout": 0.1,
+#        "print_every": 100,
+#        "plot_every": 100,
+#        "save_every": 100,
+#        "eval_every": 1000,
+#    }
+#    experiment = "simple_split"
+#    train_data = read_file(f"{experiment}/tasks_train_simple.txt")
+#    test_data = read_file(f"{experiment}/tasks_test_simple.txt")
+#    # load langs with train and test data, so both have all the words from their respective domains
+#    input_lang, output_lang, train_pairs, test_pairs = load_langs(
+#        input_lang_name="primitives",
+#        output_lang_name="commands",
+#        train_data=train_data,
+#        test_data=test_data,
+#    )
+
+#    max_length = get_max_length(train_pairs)
+
+#    train_dataloader = get_dataloader(
+#        batch_size=hparams["batch_size"],
+#        max_length=max_length,
+#        input_lang=input_lang,
+#        output_lang=output_lang,
+#        pairs=train_pairs,
+#    )
+
+#    test_dataloader = get_dataloader(
+#        batch_size=hparams["batch_size"],
+#        max_length=max_length,
+#        input_lang=input_lang,
+#        output_lang=output_lang,
+#        pairs=test_pairs,
+#    )
+
+#    encoder = CommandEncoder(
+#        input_size=input_lang.n_words,
+#        hidden_size=hparams["hidden_size"],
+#        n_layers=hparams["n_layers"],
+#        dropout=hparams["dropout"],
+#        device=device,
+#    )
+#    encoder.load(f"models/{experiment}/encoder_10000.pt")
+#    decoder = ActionDecoder(
+#        output_size=output_lang.n_words,
+#        hidden_size=hparams["hidden_size"],
+#        n_layers=hparams["n_layers"],
+#        dropout=hparams["dropout"],
+#        attention=True,
+#        attention_type='bahdanau',
+#        device=device,
+#    )
+#    decoder.load(f"models/{experiment}/decoder_10000.pt")
+
+#    encoder_optimizer = optim.Adam(encoder.parameters(), lr=hparams["lr"])
+#    decoder_optimizer = optim.Adam(decoder.parameters(), lr=hparams["lr"])
+#    criterion = nn.NLLLoss()
+#    #train_or_test()
+#    train_or_test(True)
+
+"""## Experiment 2"""
 
 if __name__ == "__main__":
     hparams = {
@@ -691,12 +822,13 @@ if __name__ == "__main__":
         "print_every": 100,
         "plot_every": 100,
         "save_every": 100,
-        "eval_every": 1000,
+        "eval_every": 10,
     }
-    experiment = "simple_split"
-    train_data = read_file(f"{experiment}/tasks_train_simple.txt")
-    test_data = read_file(f"{experiment}/tasks_test_simple.txt")
+    experiment = "length_split"
+    train_data = read_file(f"{experiment}/tasks_train_length.txt")
+    test_data = read_file(f"{experiment}/tasks_test_length.txt")
     # load langs with train and test data, so both have all the words from their respective domains
+
     input_lang, output_lang, train_pairs, test_pairs = load_langs(
         input_lang_name="primitives",
         output_lang_name="commands",
@@ -729,92 +861,24 @@ if __name__ == "__main__":
         dropout=hparams["dropout"],
         device=device,
     )
-    # encoder.load(f"models/{experiment}/encoder_10000.pt")
+    encoder.load(f"models/{experiment}/encoder_4000.pt")
     decoder = ActionDecoder(
         output_size=output_lang.n_words,
         hidden_size=hparams["hidden_size"],
         n_layers=hparams["n_layers"],
         dropout=hparams["dropout"],
         attention=True,
-        attention_type="luong",
+        attention_type="multihead",
         device=device,
+        max_length=max_length,
     )
-    # decoder.load(f"models/{experiment}/decoder_10000.pt")
+    decoder.load(f"models/{experiment}/decoder_4000.pt")
 
     encoder_optimizer = optim.Adam(encoder.parameters(), lr=hparams["lr"])
     decoder_optimizer = optim.Adam(decoder.parameters(), lr=hparams["lr"])
     criterion = nn.NLLLoss()
-    train_or_test(attention_change=True)
+    # train_or_test(attention_change=True)
     train_or_test(True, attention_change=True)
-
-# """## Experiment 2"""
-
-# if __name__ == "__main__":
-#     hparams = {
-#         "batch_size": 32,
-#         "hidden_size": 100,
-#         "n_epochs": 4000,
-#         "n_layers": 1,
-#         "lr": 0.001,
-#         "dropout": 0.1,
-#         "print_every": 100,
-#         "plot_every": 100,
-#         "save_every": 100,
-#         "eval_every": 1000,
-#     }
-#     experiment = "length_split"
-#     train_data = read_file(f"{experiment}/tasks_train_length.txt")
-#     test_data = read_file(f"{experiment}/tasks_test_length.txt")
-#     # load langs with train and test data, so both have all the words from their respective domains
-#     input_lang, output_lang, train_pairs, test_pairs = load_langs(
-#         input_lang_name="primitives",
-#         output_lang_name="commands",
-#         train_data=train_data,
-#         test_data=test_data,
-#     )
-
-#     max_length = get_max_length(train_pairs)
-
-#     train_dataloader = get_dataloader(
-#         batch_size=hparams["batch_size"],
-#         max_length=max_length,
-#         input_lang=input_lang,
-#         output_lang=output_lang,
-#         pairs=train_pairs,
-#     )
-
-#     test_dataloader = get_dataloader(
-#         batch_size=hparams["batch_size"],
-#         max_length=max_length,
-#         input_lang=input_lang,
-#         output_lang=output_lang,
-#         pairs=test_pairs,
-#     )
-
-#     encoder = CommandEncoder(
-#         input_size=input_lang.n_words,
-#         hidden_size=hparams["hidden_size"],
-#         n_layers=hparams["n_layers"],
-#         dropout=hparams["dropout"],
-#         device=device,
-#     )
-#     # encoder.load(f"models/{experiment}/encoder_500.pt")
-#     decoder = ActionDecoder(
-#         output_size=output_lang.n_words,
-#         hidden_size=hparams["hidden_size"],
-#         n_layers=hparams["n_layers"],
-#         dropout=hparams["dropout"],
-#         attention=True,
-#         attention_type="luong",
-#         device=device,
-#     )
-#     # decoder.load(f"models/{experiment}/decoder_500.pt")
-
-#     encoder_optimizer = optim.Adam(encoder.parameters(), lr=hparams["lr"])
-#     decoder_optimizer = optim.Adam(decoder.parameters(), lr=hparams["lr"])
-#     criterion = nn.NLLLoss()
-#     train_or_test(attention_change=True)
-#     train_or_test(True, attention_change=True)
 
 # """## Experiment 3"""
 
@@ -960,6 +1024,8 @@ if __name__ == "__main__":
 #         hparams["save_every"] = 10
 #         train_or_test(testing=True, variant=variant)
 
+# """## Resultados"""
+
 
 # def generate_pretty_plot(x, y, xlabel, ylabel, title):
 #     # Create figure and axes
@@ -985,3 +1051,317 @@ if __name__ == "__main__":
 
 #     # Show the plot
 #     plt.show()
+
+
+# """### Experiment 1
+
+# #### Train
+
+# ##### Accuracy
+# """
+
+# # Commented out IPython magic to ensure Python compatibility.
+# # %matplotlib inline
+
+# accs1 = np.load("logs/simple_split/train/plot_accs_4000.npy")
+# generate_pretty_plot(
+#     range(1, hparams["n_epochs"] + 1, hparams["plot_every"]),
+#     accs1,
+#     "Epoch",
+#     "Accuracy",
+#     "Experiment 1 (simple_split)",
+# )
+
+# """##### Losses"""
+
+# losses1 = np.load("logs/simple_split/train/plot_losses_4000.npy")
+# generate_pretty_plot(
+#     range(1, hparams["n_epochs"] + 1, hparams["plot_every"]),
+#     losses1,
+#     "Epoch",
+#     "Losses",
+#     "Experiment 1 (simple_split)",
+# )
+
+# """#### Test"""
+
+# accs1_test = np.load("logs/simple_split/test/plot_accs_700.npy")
+# losses1_test = np.load("logs/simple_split/test/plot_losses_700.npy")
+# print(f"Mean Accuracy: {np.mean(accs1_test)}, Mean Loss: {np.mean(losses1_test)}")
+
+# """### Experiment 2
+
+# #### Train
+
+# ##### Accuracy
+
+# ###### Bahdanau Attention
+# """
+
+# accs1 = np.load("logs/length_split/train/plot_accs_4000.npy")
+# generate_pretty_plot(
+#     range(1, hparams["n_epochs"] + 1, hparams["plot_every"]),
+#     accs1,
+#     "Epoch",
+#     "Accuracy",
+#     "Experiment 2 - Bahdanau Attention (length_split)",
+# )
+
+# """###### Luong's Attention"""
+
+# accs1 = np.load("logs/length_split/train/plot_accs_luong_4000.npy")
+# generate_pretty_plot(
+#     range(1, hparams["n_epochs"] + 1, hparams["plot_every"]),
+#     accs1,
+#     "Epoch",
+#     "Accuracy",
+#     "Experiment 2 - Luong Attention (length_split)",
+# )
+
+# """###### MultiHead Self-Attention"""
+
+# accs1 = np.load("logs/length_split/train/plot_accs_multihead_4000.npy")
+# generate_pretty_plot(
+#     range(1, hparams["n_epochs"] + 1, hparams["plot_every"]),
+#     accs1,
+#     "Epoch",
+#     "Accuracy",
+#     "Experiment 2 - MultiHead Self-Attention (length_split)",
+# )
+
+# """##### Losses
+
+# ###### Bahdanau Attention
+# """
+
+# losses1 = np.load("logs/length_split/train/plot_losses_4000.npy")
+# generate_pretty_plot(
+#     range(1, hparams["n_epochs"] + 1, hparams["plot_every"]),
+#     losses1,
+#     "Epoch",
+#     "Losses",
+#     "Experiment 2 - Bahdanau Attention (length_split)",
+# )
+
+# """###### Luong's Attention"""
+
+# losses1 = np.load("logs/length_split/train/plot_losses_luong_4000.npy")
+# generate_pretty_plot(
+#     range(1, hparams["n_epochs"] + 1, hparams["plot_every"]),
+#     losses1,
+#     "Epoch",
+#     "Losses",
+#     "Experiment 2 - Luong Attention (length_split)",
+# )
+
+# """###### MultiHead Self-Attention"""
+
+# losses1 = np.load("logs/length_split/train/plot_losses_multihead_4000.npy")
+# generate_pretty_plot(
+#     range(1, hparams["n_epochs"] + 1, hparams["plot_every"]),
+#     losses1,
+#     "Epoch",
+#     "Losses",
+#     "Experiment 2 - MultiHead Self-Attention (length_split)",
+# )
+
+# """#### Test"""
+
+# accs1_test = np.load("logs/length_split/test/plot_accs_100.npy")
+# losses1_test = np.load("logs/length_split/test/plot_losses_100.npy")
+# print(
+#     f"Bahdanau Mean Accuracy: {np.mean(accs1_test)}, Mean Loss: {np.mean(losses1_test)}"
+# )
+
+# accs1_test = np.load("logs/length_split/test/plot_accs_luong_100.npy")
+# losses1_test = np.load("logs/length_split/test/plot_losses_luong_100.npy")
+# print(f"Luong Mean Accuracy: {np.mean(accs1_test)}, Mean Loss: {np.mean(losses1_test)}")
+
+# accs1_test = np.load("logs/length_split/test/plot_accs_multihead_100.npy")
+# losses1_test = np.load("logs/length_split/test/plot_losses_multihead_100.npy")
+# print(
+#     f"MultiHead Self-Attention Mean Accuracy: {np.mean(accs1_test)}, Mean Loss: {np.mean(losses1_test)}"
+# )
+
+# """### Experiment 3
+
+# #### Train
+
+# ##### Accuracy
+
+# ###### add_prim_split_turn_left
+# """
+
+# accs1 = np.load("logs/add_prim_split_turn_left/train/plot_accs_4000.npy")
+# generate_pretty_plot(
+#     range(1, hparams["n_epochs"] + 1, hparams["plot_every"]),
+#     accs1,
+#     "Epoch",
+#     "Accuracy",
+#     "Experiment 3 (add_prim_split_turn_left)",
+# )
+
+# """###### add_prim_split_jump"""
+
+# accs1 = np.load("logs/add_prim_split_jump/train/plot_accs_4000.npy")
+# generate_pretty_plot(
+#     range(1, hparams["n_epochs"] + 1, hparams["plot_every"]),
+#     accs1,
+#     "Epoch",
+#     "Accuracy",
+#     "Experiment 3 (add_prim_split_jump)",
+# )
+
+# """##### Losses
+
+# ###### add_prim_split_turn_left
+# """
+
+# losses1 = np.load("logs/add_prim_split_turn_left/train/plot_losses_4000.npy")
+# generate_pretty_plot(
+#     range(1, hparams["n_epochs"] + 1, hparams["plot_every"]),
+#     losses1,
+#     "Epoch",
+#     "Losses",
+#     "Experiment 3 (add_prim_turn_left)",
+# )
+
+# """###### add_prim_split_jump"""
+
+# losses1 = np.load("logs/add_prim_split_jump/train/plot_losses_4000.npy")
+# generate_pretty_plot(
+#     range(1, hparams["n_epochs"] + 1, hparams["plot_every"]),
+#     losses1,
+#     "Epoch",
+#     "Losses",
+#     "Experiment 3 (add_prim_split_jump)",
+# )
+
+# """#### Test
+
+# **add_prim_split_turn_left**
+
+#  - Mean Accuracy: 0.9982 Mean Loss: 0.0056
+
+# **add_prim_split_jump**
+# """
+
+# accs1_test = np.load("logs/add_prim_split_jump/test/plot_accs_100.npy")
+# losses1_test = np.load("logs/add_prim_split_jump/test/plot_losses_100.npy")
+# print(f"Mean Accuracy: {np.mean(accs1_test)}, Mean Loss: {np.mean(losses1_test)}")
+
+# """### Experiment 4
+
+# #### Train
+
+# ##### Accuracy
+
+# ###### filler_split_0
+# """
+
+# accs1 = np.load("logs/filler_split_0/train/plot_accs_4000.npy")
+# generate_pretty_plot(
+#     range(1, hparams["n_epochs"] + 1, hparams["plot_every"]),
+#     accs1,
+#     "Epoch",
+#     "Accuracy",
+#     "Experiment 4 (filler_split_0)",
+# )
+
+# """###### filler_split_1"""
+
+# accs1 = np.load("logs/filler_split_1/train/plot_accs_4000.npy")
+# generate_pretty_plot(
+#     range(1, hparams["n_epochs"] + 1, hparams["plot_every"]),
+#     accs1,
+#     "Epoch",
+#     "Accuracy",
+#     "Experiment 4 (filler_split_1)",
+# )
+
+# """###### filler_split_2"""
+
+# accs1 = np.load("logs/filler_split_2/train/plot_accs_4000.npy")
+# generate_pretty_plot(
+#     range(1, hparams["n_epochs"] + 1, hparams["plot_every"]),
+#     accs1,
+#     "Epoch",
+#     "Accuracy",
+#     "Experiment 4 (filler_split_2)",
+# )
+
+# """###### filler_split_3"""
+
+# accs1 = np.load("logs/filler_split_3/train/plot_accs_4000.npy")
+# generate_pretty_plot(
+#     range(1, hparams["n_epochs"] + 1, hparams["plot_every"]),
+#     accs1,
+#     "Epoch",
+#     "Accuracy",
+#     "Experiment 4 (filler_split_3)",
+# )
+
+# """##### Losses
+
+# ###### filler_split_0
+# """
+
+# losses1 = np.load("logs/filler_split_0/train/plot_losses_4000.npy")
+# generate_pretty_plot(
+#     range(1, hparams["n_epochs"] + 1, hparams["plot_every"]),
+#     losses1,
+#     "Epoch",
+#     "Losses",
+#     "Experiment 4 (filler_split_0)",
+# )
+
+# """###### filler_split_1"""
+
+# losses1 = np.load("logs/filler_split_1/train/plot_losses_4000.npy")
+# generate_pretty_plot(
+#     range(1, hparams["n_epochs"] + 1, hparams["plot_every"]),
+#     losses1,
+#     "Epoch",
+#     "Losses",
+#     "Experiment 4 (filler_split_1)",
+# )
+
+# """###### filler_split_2"""
+
+# losses1 = np.load("logs/filler_split_2/train/plot_losses_4000.npy")
+# generate_pretty_plot(
+#     range(1, hparams["n_epochs"] + 1, hparams["plot_every"]),
+#     losses1,
+#     "Epoch",
+#     "Losses",
+#     "Experiment 4 (filler_split_2)",
+# )
+
+# """###### filler_split_3"""
+
+# losses1 = np.load("logs/filler_split_3/train/plot_losses_4000.npy")
+# generate_pretty_plot(
+#     range(1, hparams["n_epochs"] + 1, hparams["plot_every"]),
+#     losses1,
+#     "Epoch",
+#     "Losses",
+#     "Experiment 4 (filler_split_3)",
+# )
+
+# """#### Test
+
+# **filler_split_0**
+# - Mean Accuracy: 0.9824 Mean Loss: 0.1130
+
+# **filler_split_1**
+
+# - Mean Accuracy: 0.9926 Mean Loss: 0.0381
+
+# **filler_split_2**
+
+# - Mean Accuracy: 0.9987 Mean Loss: 0.0046
+
+# **filler_split_3**
+
+# - Mean Accuracy: 0.9991 Mean Loss: 0.0026
+# """
