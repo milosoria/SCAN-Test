@@ -27,7 +27,7 @@ def evaluate(
     pair: Tuple[str, str],
     input_lang: Lang,
     output_lang: Lang,
-) -> Tuple[list[str], torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[list[str], torch.Tensor, float, float]:
     encoder_hidden, encoder_cell = (None, None)
     (input_sentence, input_target) = pair
     with torch.no_grad():
@@ -57,7 +57,7 @@ def evaluate(
             EOS_TOKEN,
         )
         topi = topi.squeeze()
-        acc = torch.sum((topi == target_tensor)) / len(target_tensor)
+        acc = (torch.sum((topi == target_tensor)) / len(target_tensor)).cpu().item()
         loss = criterion(
             decoder_outputs.view(-1, decoder_outputs.size(-1)),
             target_tensor.view(-1),
@@ -83,9 +83,7 @@ def evaluate_randomly(
             output_lang=output_lang,
         )
         output_sentence = " ".join(output_words)
-        output_str = f"INPUT: {pair[0]}\nTARGET: {pair[1]}\nOUTPUT: {output_sentence}\nLOSS:\
-                {loss}\n ACC: {acc}\n"
-        log_it(output_str, experiment)
+        return f"INPUT: {pair[0]}\nTARGET: {pair[1]}\nOUTPUT: {output_sentence}\nLOSS: {loss}\nACC: {acc}\n"
 
 
 def train_or_test(test: bool = False):
@@ -103,13 +101,14 @@ def train_or_test(test: bool = False):
             encoder.train()
             decoder.train()
         loss, acc = epoch_loop(
-            test_dataloader if test else train_dataloader,
-            encoder,
-            decoder,
-            max_length,
-            encoder_optimizer,
-            decoder_optimizer,
-            criterion,
+            dataloader=test_dataloader if test else train_dataloader,
+            encoder=encoder,
+            decoder=decoder,
+            max_length=max_length,
+            encoder_optimizer=encoder_optimizer,
+            decoder_optimizer=decoder_optimizer,
+            criterion=criterion,
+            testing=test,
         )
         print_acc_total += acc
         plot_acc_total += acc
@@ -127,42 +126,41 @@ def train_or_test(test: bool = False):
                 print_loss_avg,
                 print_acc_avg,
             )
-            log_it(output_str, experiment)
+            log_it(output_str, experiment, train=(not test))
 
         if epoch % hparams["plot_every"] == 0:
             plot_loss_avg = plot_loss_total / hparams["plot_every"]
             plot_losses.append(plot_loss_avg)
             plot_loss_total = 0
-            if len(plot_losses) >= 100:
-                show_plot(plot_losses)
+            show_plot(plot_losses)
             plot_acc_avg = plot_acc_total / hparams["plot_every"]
             plot_accs.append(plot_acc_avg)
             plot_acc_total = 0
-            if len(plot_accs) >= 100:
-                show_plot(plot_accs)
+            show_plot(plot_accs)
 
         if epoch % hparams["save_every"] == 0:
             if not test:
-                encoder.save(f"models/{experiment}/train/encoder_{epoch}.pt")
-                decoder.save(f"models/{experiment}/train/decoder_{epoch}.pt")
+                encoder.save(f"models/{experiment}/encoder_{epoch}.pt")
+                decoder.save(f"models/{experiment}/decoder_{epoch}.pt")
             np.save(
-                f"models/{experiment}/{'test' if test else 'train'}/plot_losses_{epoch}.npy",
+                f"logs/{experiment}/{'test' if test else 'train'}/plot_losses_{epoch}.npy",
                 plot_losses,
             )
             np.save(
-                f"models/{experiment}/{'test' if test else 'train'}/plot_accs_{epoch}.npy",
+                f"logs/{experiment}/{'test' if test else 'train'}/plot_accs_{epoch}.npy",
                 plot_accs,
             )
 
         if epoch % hparams["eval_every"] == 0:
             print("Evaluating: ")
-            evaluate_randomly(
+            output_str = evaluate_randomly(
                 encoder=encoder,
                 decoder=decoder,
                 input_lang=input_lang,
                 output_lang=output_lang,
                 pairs=test_pairs,
             )
+            log_it(output_str, experiment, train=(not test))
 
 
 if __name__ == "__main__":
@@ -174,8 +172,8 @@ if __name__ == "__main__":
         "lr": 0.001,
         "dropout": 0.1,
         "print_every": 10,
-        "plot_every": 100,
-        "save_every": 100,
+        "plot_every": 10,
+        "save_every": 10,
         "eval_every": 100,
     }
     experiment = "length_split"
@@ -214,7 +212,7 @@ if __name__ == "__main__":
         dropout=hparams["dropout"],
         device=device,
     )
-    # encoder.load(f"models/{experiment}/encoder_500.pt")
+    encoder.load(f"models/{experiment}/encoder_500.pt")
     decoder = ActionDecoder(
         output_size=output_lang.n_words,
         hidden_size=hparams["hidden_size"],
@@ -223,10 +221,10 @@ if __name__ == "__main__":
         attention=True,
         device=device,
     )
-    # decoder.load(f"models/{experiment}/decoder_500.pt")
+    decoder.load(f"models/{experiment}/decoder_500.pt")
 
     encoder_optimizer = optim.Adam(encoder.parameters(), lr=hparams["lr"])
     decoder_optimizer = optim.Adam(decoder.parameters(), lr=hparams["lr"])
     criterion = nn.NLLLoss()
-    train_or_test()
+    # train_or_test()
     train_or_test(True)

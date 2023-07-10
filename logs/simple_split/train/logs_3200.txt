@@ -1,0 +1,1 @@
+(Epoch: 3200, Progress: 32%) Loss: 0.0014 Acc: 0.9995

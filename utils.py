@@ -6,6 +6,8 @@ from encoder import CommandEncoder
 from decoder import ActionDecoder
 from torch.utils.data import DataLoader, RandomSampler, TensorDataset
 import matplotlib.pyplot as plt
+
+plt.switch_backend("agg")
 import matplotlib.ticker as ticker
 
 
@@ -118,7 +120,7 @@ def get_dataloader(
     return train_dataloader
 
 
-def show_plot(points: list[float]):
+def show_pl∫ot(points: list[float]):
     plt.figure()
     fig, ax = plt.subplots()
     # this locator puts ticks at regular intervals
@@ -130,7 +132,7 @@ def show_plot(points: list[float]):
 
 def log_it(output_str: str, experiment: str, train: bool = True):
     print(output_str)
-    with open(f"logs/{experiment}/{'train' if train else 'test'}_logs.txt", "a") as f:
+    with open(f"logs/{experiment}/{'train' if train else 'test'}/logs.txt", "a") as f:
         f.write(output_str)
 
 
@@ -142,6 +144,7 @@ def epoch_loop(
     encoder_optimizer,
     decoder_optimizer,
     criterion,
+    testing: bool = False,
 ) -> Tuple[float, Union[torch.Tensor, float]]:
     # Training Loop
     total_loss = 0
@@ -166,8 +169,9 @@ def epoch_loop(
 
         _, topi = decoder_outputs.topk(1)
         topi = topi.squeeze()
-        acc = torch.sum((topi == target_tensor)) / len(target_tensor)
-        loss.backward()
+        acc = (torch.sum((topi == target_tensor)) / len(target_tensor)).cpu().item()
+        if not testing:
+            loss.backward()
 
         encoder_optimizer.step()
         decoder_optimizer.step()

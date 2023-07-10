@@ -1,0 +1,1 @@
+(Epoch: 1900, Progress: 19%) Loss: 0.0068 Acc: 0.9978
